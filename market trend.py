@@ -10,71 +10,71 @@ import pytz
 st.set_page_config(page_title="台股動態熱錢與資金輪動儀表板", layout="wide", page_icon="📈")
 
 st.title("🔥 台股當日動態熱錢與資金輪動監控儀表板")
-st.caption("自動抓取台灣證交所 (TWSE) 當日成交量排行榜與熱門概念股，即時分析熱錢動能")
+st.caption("自動抓取台灣證交所 (TWSE) 當日成交量排行榜，即時分析個股與 ETF 之熱錢動能")
 
-# 2. 自動爬取證交所 (TWSE) 當日成交量排行榜
-@st.cache_data(ttl=600) # 快取 10 分鐘，避免頻繁請求證交所 API
-def get_twse_top_volume_tickers():
+# 2. 自動爬取證交所 (TWSE) 當日成交量排行榜 (區分個股與 ETF)
+@st.cache_data(ttl=600) # 快取 10 分鐘
+def get_twse_top_tickers():
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
-    ticker_dict = {"^TWII": "台股加權大盤"}
+    stocks_dict = {"^TWII": "台股加權大盤"}
+    etf_dict = {"^TWII": "台股加權大盤"}
+    
     try:
         res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
         if "data" in data:
-            # 取得前 40 大成交量個股
-            for row in data["data"][:40]:
-                code = row[1].strip() # 股票代碼
-                name = row[2].strip() # 股票名稱
-                # 排除 ETF (代碼長度>4 或 00開頭) 以確保抓到的是純個股
-                if len(code) == 4 and not code.startswith("00"):
-                    ticker_dict[f"{code}.TW"] = f"{name} ({code})"
+            for row in data["data"]:
+                code = str(row[1]).strip() # 股票代碼
+                name = str(row[2]).strip() # 股票名稱
+                
+                # 判定為純個股 (4位數字，且不為 00 開頭)
+                if len(code) == 4 and code.isdigit() and not code.startswith("00"):
+                    if len(stocks_dict) < 40: # 抓成交量前 40 大個股
+                        stocks_dict[f"{code}.TW"] = f"{name} ({code})"
+                
+                # 判定為 ETF (00開頭)
+                elif code.startswith("00"):
+                    if len(etf_dict) < 30: # 抓成交量前 30 大 ETF
+                        etf_dict[f"{code}.TW"] = f"{name} ({code})"
     except Exception as e:
-        st.warning(f"無法自動連結證交所熱門榜，改啟動核心產業備援清單：{e}")
-        backup = {
+        st.warning(f"無法自動連結證交所熱門榜，啟動備援熱門清單：{e}")
+        backup_stocks = {
             "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", 
-            "2382.TW": "廣達", "3231.TW": "緯創", "2603.TW": "長榮", 
-            "1519.TW": "華城", "3017.TW": "奇鋐", "2359.TW": "所羅門"
+            "2382.TW": "廣達", "3231.TW": "緯創", "2603.TW": "長榮"
         }
-        ticker_dict.update(backup)
+        backup_etf = {
+            "0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息",
+            "00919.TW": "群益台灣精選高息", "00929.TW": "復華台灣科技優息"
+        }
+        stocks_dict.update(backup_stocks)
+        etf_dict.update(backup_etf)
         
-    return ticker_dict
-
-ETF_MAP = {
-    "^TWII": "台股加權大盤",
-    "0050.TW": "元大台灣50",
-    "0056.TW": "元大高股息",
-    "00878.TW": "國泰永續高股息",
-    "00919.TW": "群益台灣精選高息",
-    "00929.TW": "復華台灣科技優息",
-    "00940.TW": "元大台灣價值高息",
-    "0052.TW": "富邦科技",
-    "0055.TW": "元大金融",
-    "0051.TW": "元大中型100",
-}
+    return stocks_dict, etf_dict
 
 # 3. 側邊欄控制項
 st.sidebar.header("⚙️ 篩選與模式設定")
 
 view_mode = st.sidebar.selectbox(
     "請選擇分析目標：",
-    ["🔥 證交所當日爆量熱門股 (自動更新)", "📊 核心主題型/產業 ETF", "➕ 僅檢視自訂股票"]
+    ["🔥 證交所當日爆量熱門個股 (自動更新)", "📊 證交所當日爆量熱門 ETF (自動更新)", "➕ 僅檢視自訂股票"]
 )
 
-# 手動輸入股票代碼（僅在選取「僅檢視自訂股票」時或需自行新增時提供輸入框）
-custom_tickers_input = st.sidebar.text_input(
-    "手動輸入自訂股票代碼 (多筆可用逗點分隔，例如：2357, 2454)：", 
-    value="2357.TW"
-)
+# 抓取證交所最新個股與 ETF 資料
+stocks_map, etf_map = get_twse_top_tickers()
 
-# 根據選單模式嚴格分離標的，手動輸入標的不混入其他頁面
-if "當日爆量熱門股" in view_mode:
-    target_map = get_twse_top_volume_tickers()
-elif "主題型" in view_mode:
-    target_map = ETF_MAP.copy()
+# 根據選單模式分流標的與介面顯示
+if "爆量熱門個股" in view_mode:
+    target_map = stocks_map
+elif "爆量熱門 ETF" in view_mode:
+    target_map = etf_map
 else:
-    # 僅檢視自訂股票模式
+    # 只有選到「僅檢視自訂股票」時，才顯示手動輸入框
+    custom_tickers_input = st.sidebar.text_input(
+        "手動輸入自訂股票代碼 (多筆可用逗點分隔，例如：2408, 2330)：", 
+        value="2408.TW"
+    )
     target_map = {"^TWII": "台股加權大盤"}
     if custom_tickers_input.strip():
         items = custom_tickers_input.replace("，", ",").split(",")
@@ -159,7 +159,7 @@ try:
                 "資金診斷": status
             })
             
-        df = pd.DataFrame(results).sort_values(by="3日漲跌(%)", ascending=False)
+        df = pd.DataFrame(results).sort_values(by="3日漲跌(%)", ascending=False).reset_index(drop=True)
 
         # 5. 視覺化呈現
         if not df.empty:
@@ -192,7 +192,7 @@ try:
 
             # 詳細數據資料表
             st.subheader(f"📋 數據排行榜明細 (共 {len(df)} 支)")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("沒有可顯示的標的，請於左側選單輸入自訂股票代號。")
 
