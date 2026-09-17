@@ -22,7 +22,6 @@ st.caption("結合證交所當日爆量熱錢、三維度評分（技術/籌碼/
 # -----------------------------------------------------------------------------
 
 def estimate_daily_volume(volume_so_far):
-    """根據台灣時間 (UTC+8) 盤中進度 (09:00 - 13:30 共 270 分鐘) 推算預估成交量"""
     tw_tz = timezone(timedelta(hours=8))
     now_tw = datetime.now(tw_tz)
 
@@ -42,7 +41,7 @@ def estimate_daily_volume(volume_so_far):
 def fetch_yahoo_detail(symbol):
     chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=60d&interval=1d"
     req_chart = urllib.request.Request(
-        chart_url, headers={"User-Agent": "Mozilla/5.0"}
+        chart_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     )
     try:
         with urllib.request.urlopen(req_chart, timeout=5) as resp:
@@ -71,7 +70,7 @@ def fetch_yahoo_detail(symbol):
     except Exception:
         return None
 
-def evaluate_stock_full(symbol, min_volume_actual=30, min_volume_est=30, ignore_filters=False):
+def evaluate_stock_full(symbol, min_score_filter=0):
     data = fetch_yahoo_detail(symbol)
     if not data or len(data["close"]) < 20:
         return None
@@ -84,12 +83,8 @@ def evaluate_stock_full(symbol, min_volume_actual=30, min_volume_est=30, ignore_
         data["volume"],
     )
     latest_price = closes[-1]
-    vol_shares = int(volumes[-1] / 1000)
+    vol_shares = int(volumes[-1] / 1000) if volumes[-1] > 0 else 0
     est_vol_shares = estimate_daily_volume(vol_shares)
-
-    if not ignore_filters:
-        if latest_price < 5.0 or vol_shares < min_volume_actual or est_vol_shares < min_volume_est:
-            return None
 
     code = symbol.split(".")[0]
     name = data["name"]
@@ -108,22 +103,22 @@ def evaluate_stock_full(symbol, min_volume_actual=30, min_volume_est=30, ignore_
 
     if latest_price >= ma20:
         tech_score += 15
-        tech_details.append("站穩 20 日月線")
+        tech_details.append("站穩20日線")
     else:
-        tech_details.append("跌破 20 日月線")
+        tech_details.append("跌破20日線")
 
     if ma5 >= ma20 >= ma60:
         tech_score += 12
-        tech_details.append("均線多頭排列")
+        tech_details.append("均線多頭")
     elif ma5 >= ma20:
         tech_score += 6
-        tech_details.append("短中期均線偏多")
+        tech_details.append("短中期偏多")
 
     upper_shadow = highs[-1] - max(latest_price, opens[-1])
     body_size = abs(latest_price - opens[-1])
     if upper_shadow <= (body_size * 0.8):
         tech_score += 8
-        tech_details.append("無過長上影線")
+        tech_details.append("無長上影線")
 
     # 2. 籌碼量能 (35%)
     chip_score = 0
@@ -153,6 +148,9 @@ def evaluate_stock_full(symbol, min_volume_actual=30, min_volume_est=30, ignore_
             fund_score += 10
 
     total_score = tech_score + chip_score + fund_score
+
+    if total_score < min_score_filter:
+        return None
 
     # 風控進出場點位推算
     low_10d, high_20d = min(lows[-10:]), max(highs[-20:])
@@ -186,9 +184,8 @@ def evaluate_stock_full(symbol, min_volume_actual=30, min_volume_est=30, ignore_
 
 @st.cache_data(ttl=600)
 def get_twse_top_tickers():
-    """自動從證交所抓取當日成交量 Top 40"""
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     symbols = []
     try:
         res = requests.get(url, headers=headers, timeout=10)
@@ -203,7 +200,7 @@ def get_twse_top_tickers():
     except Exception:
         pass
     if not symbols:
-        symbols = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "3231.TW", "2603.TW", "2408.TW"]
+        symbols = ["2330.TW", "2317.TW", "2454.TW", "2382.TW", "3231.TW", "2603.TW", "2408.TW", "1303.TW"]
     return symbols
 
 # -----------------------------------------------------------------------------
@@ -220,17 +217,11 @@ with st.sidebar:
 
     if app_mode == "🔥 證交所當日熱錢綜合診斷":
         st.subheader("⚙️ 熱錢健檢門檻")
-        min_score = st.slider("最低健檢總分門檻", 50, 100, 70)
-        min_vol_actual = st.number_input("當日成交量下限(張)", value=1000, step=500)
+        min_score = st.slider("最低健檢總分門檻", 50, 100, 60) # 預設下修至 60 分避免門檻太高
 
     elif app_mode == "🔍 號碼區間掃描":
         st.subheader("⚙️ 區間篩選門檻")
-        min_score, max_score = st.slider("健檢分數區間", 50, 100, (75, 100))
-        col_vol1, col_vol2 = st.columns(2)
-        with col_vol1:
-            min_vol_actual = st.number_input("當日成交量(張)", value=500, step=100)
-        with col_vol2:
-            min_vol_est = st.number_input("預估成交量(張)", value=500, step=100)
+        min_score_range = st.slider("健檢分數區間", 50, 100, (60, 100))
 
         scan_mode = st.radio(
             "號碼區間選擇",
@@ -247,31 +238,30 @@ with st.sidebar:
             end_code = st.number_input("結束號碼", value=2350, step=10)
 
     else:
-        st.info("💡 單股診斷不受成交量與分數門檻限制")
         single_code = st.text_input("輸入股票代號", value="2408").strip()
 
 # -----------------------------------------------------------------------------
-# 模式 1：證交所當日熱錢綜合診斷 (全新強大整合模式)
+# 模式 1：證交所當日熱錢綜合診斷
 # -----------------------------------------------------------------------------
 if app_mode == "🔥 證交所當日熱錢綜合診斷":
     st.subheader("🔥 證交所當日爆量熱錢 — 三維度綜合診斷報告")
     
     tw_tz = pytz.timezone('Asia/Taipei')
     fetch_time = datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M:%S")
-    st.info(f"🕒 **分析時間**：`{fetch_time} (台灣時間)` ｜ 正在自動掃描證交所成交量 Top 40 熱門股...")
+    st.info(f"🕒 **分析時間**：`{fetch_time} (台灣時間)` ｜ 正在自動連線證交所熱門榜進行健檢...")
 
-    with st.spinner("正在計算熱錢動能與三維度健康評分..."):
+    with st.spinner("正在抓取與計算全市場熱錢健檢分數..."):
         top_symbols = get_twse_top_tickers()
         results = []
         for symbol in top_symbols:
-            res = evaluate_stock_full(symbol, min_volume_actual=min_vol_actual, ignore_filters=False)
-            if res and res["健檢總分"] >= min_score:
+            res = evaluate_stock_full(symbol, min_score_filter=min_score)
+            if res:
                 results.append(res)
 
     if results:
         df = pd.DataFrame(results).sort_values(by="健檢總分", ascending=False).reset_index(drop=True)
         
-        # 散佈圖（四象限：X軸=量能倍數，Y軸=健檢總分）
+        # 散佈圖
         st.subheader("📌 熱錢動能與健檢分數矩陣 (右上角為最強優質股)")
         fig = px.scatter(
             df,
@@ -284,9 +274,9 @@ if app_mode == "🔥 證交所當日熱錢綜合診斷":
             size_max=18
         )
         fig.add_vline(x=1.0, line_dash="dash", line_color="gray", opacity=0.7)
-        fig.add_hline(y=75, line_dash="dash", line_color="gray", opacity=0.7)
+        fig.add_hline(y=70, line_dash="dash", line_color="gray", opacity=0.7)
         fig.update_traces(textposition='top center', marker=dict(size=12))
-        fig.update_layout(height=500, xaxis_title="量能倍數 ( > 1.0 代表爆量 )", yaxis_title="三維度健檢總分 ( >= 75 代表優質 )")
+        fig.update_layout(height=500, xaxis_title="量能倍數 ( > 1.0 代表爆量 )", yaxis_title="三維度健檢總分")
         st.plotly_chart(fig, use_container_width=True)
 
         # 數據資料表
@@ -302,6 +292,8 @@ if app_mode == "🔥 證交所當日熱錢綜合診斷":
                 col2.metric("成交 / 預估量", f"{item['當日成交張數']} 張", f"預估 {item['預估成交張數']} 張")
                 col3.metric("建議卡位區", item["建議卡位進場區"])
                 col4.metric("目標 / 停損", f"{item['第一目標價']} / {item['停損防守價']}")
+    else:
+        st.warning("目前設定之分數門檻過高，無符合標的，請嘗試調低側邊欄的「最低健檢總分門檻」。")
 
 # -----------------------------------------------------------------------------
 # 模式 2：號碼區間掃描
@@ -325,8 +317,8 @@ elif app_mode == "🔍 號碼區間掃描":
         results = []
         for idx, symbol in enumerate(symbols):
             progress_bar.progress((idx + 1) / len(symbols))
-            res = evaluate_stock_full(symbol, min_volume_actual=min_vol_actual, min_volume_est=min_vol_est)
-            if res and min_score[0] <= res["健檢總分"] <= min_score[1]:
+            res = evaluate_stock_full(symbol)
+            if res and min_score_range[0] <= res["健檢總分"] <= min_score_range[1]:
                 results.append(res)
 
         progress_bar.empty()
@@ -336,16 +328,16 @@ elif app_mode == "🔍 號碼區間掃描":
             st.success(f"🎉 掃描完成！共有 {len(df)} 檔符合門檻標的：")
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            st.warning("💡 當前條件下無符合標的，可嘗試調低成交量或分數門檻。")
+            st.warning("💡 當前條件下無符合標的，可嘗試調低分數門檻。")
 
 # -----------------------------------------------------------------------------
 # 模式 3：單股精準診斷
 # -----------------------------------------------------------------------------
 elif app_mode == "🩺 單股精準診斷":
     if single_code:
-        res = evaluate_stock_full(f"{single_code}.TW", ignore_filters=True)
+        res = evaluate_stock_full(f"{single_code}.TW")
         if not res:
-            res = evaluate_stock_full(f"{single_code}.TWO", ignore_filters=True)
+            res = evaluate_stock_full(f"{single_code}.TWO")
 
         if res:
             st.subheader(f"🩺 【{res['代號']} {res['名稱']}】 診斷與風控點位報告")
