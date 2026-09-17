@@ -53,6 +53,30 @@ def get_twse_top_tickers():
         
     return stocks_dict, etf_dict
 
+# 自動取得自訂股票名稱小幫手
+@st.cache_data(ttl=86400) # 名稱快取 1 天
+def get_stock_name(ticker_code):
+    try:
+        clean_code = ticker_code.replace(".TW", "").replace(".TWO", "")
+        # 先從證交所 API 嘗試比對名稱
+        url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json"
+        res = requests.get(url, timeout=3).json()
+        if "data" in res:
+            for row in res["data"]:
+                if str(row[1]).strip() == clean_code:
+                    return f"{row[2].strip()} ({clean_code})"
+    except:
+        pass
+    
+    # 若證交所清單未包含，嘗試使用 yfinance 抓取 shortName
+    try:
+        t = yf.Ticker(ticker_code)
+        info = t.info
+        name = info.get("shortName", clean_code)
+        return f"{name} ({clean_code})"
+    except:
+        return f"股票代碼 ({clean_code})"
+
 # 3. 側邊欄控制項
 st.sidebar.header("⚙️ 篩選與模式設定")
 
@@ -73,7 +97,7 @@ else:
     # 只有選到「僅檢視自訂股票」時，才顯示手動輸入框
     custom_tickers_input = st.sidebar.text_input(
         "手動輸入自訂股票代碼 (多筆可用逗點分隔，例如：2408, 2330)：", 
-        value="2408.TW"
+        value="2408"
     )
     target_map = {"^TWII": "台股加權大盤"}
     if custom_tickers_input.strip():
@@ -82,8 +106,12 @@ else:
             code = raw_item.strip().upper()
             if code:
                 if not code.endswith(".TW") and not code.startswith("^"):
-                    code += ".TW"
-                target_map[code] = f"自訂標的 ({code})"
+                    full_code = code + ".TW"
+                else:
+                    full_code = code
+                # 自動查詢並帶入正確股票名稱
+                stock_name = get_stock_name(full_code)
+                target_map[full_code] = stock_name
 
 # 4. 下載歷史數據並計算動能
 @st.cache_data(ttl=300)
