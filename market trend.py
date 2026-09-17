@@ -2,70 +2,96 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.express as px
+import requests
+from datetime import datetime
+import pytz
 
 # 1. 設定網頁標題與寬度 layout
-st.set_page_config(page_title="台股資金輪動監控儀表板", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股動態熱錢與全市場資金輪動儀表板", layout="wide", page_icon="📈")
 
-st.title("📊 台股短期資金輪動與族群動能監控")
-st.caption("即時分析台股主要產業、個股與 ETF 之 3日/5日 動能與成交量異常變化")
+st.title("🔥 台股當日動態熱錢與資金輪動監控儀表板")
+st.caption("自動抓取台灣證交所 (TWSE) 當日成交量排行榜與熱門概念股，即時分析熱錢動能")
 
-# 2. 定義監控標的群組 (分成：個股、ETF)
-STOCKS_MAP = {
-    "2330.TW": "台積電 (晶圓代工)",
-    "2454.TW": "聯發科 (IC設計)",
-    "2317.TW": "鴻海 (AI伺服器/代工)",
-    "2382.TW": "廣達 (AI伺服器/代工)",
-    "3231.TW": "緯創 (AI代工)",
-    "2308.TW": "台達電 (電源/綠能/散熱)",
-    "1519.TW": "華城 (重電/電網)",
-    "1503.TW": "士電 (重電/電力設備)",
-    "2603.TW": "長榮 (貨櫃航運)",
-    "2609.TW": "陽明 (貨櫃航運)",
-    "2881.TW": "富邦金 (大型金控)",
-    "2882.TW": "國泰金 (大型金控)",
-    "2379.TW": "瑞昱 (網通IC)",
-    "3661.TW": "世芯-KY (IP矽智財)",
-    "2408.TW": "南亞科 (記憶體/DRAM)",
-    "1795.TW": "美時 (生技製藥)",
-    "2002.TW": "中鋼 (原物料/鋼鐵)",
-}
+# 2. 自動爬取證交所 (TWSE) 當日成交量排行榜
+@st.cache_data(ttl=600) # 快取 10 分鐘，避免頻繁請求證交所 API
+def get_twse_top_volume_tickers():
+    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX20?response=json"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    ticker_dict = {"^TWII": "台股加權大盤"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        if "data" in data:
+            # 取得前 40 大成交量個股
+            for row in data["data"][:40]:
+                code = row[1].strip() # 股票代碼
+                name = row[2].strip() # 股票名稱
+                # 排除 ETF (代碼長度>4 或 00開頭) 以確保抓到的是純個股
+                if len(code) == 4 and not code.startswith("00"):
+                    ticker_dict[f"{code}.TW"] = f"{name} ({code})"
+    except Exception as e:
+        st.warning(f"無法自動連結證交所熱門榜，改啟動核心產業備援清單：{e}")
+        backup = {
+            "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", 
+            "2382.TW": "廣達", "3231.TW": "緯創", "2603.TW": "長榮", 
+            "1519.TW": "華城", "3017.TW": "奇鋐", "2359.TW": "所羅門"
+        }
+        ticker_dict.update(backup)
+        
+    return ticker_dict
 
 ETF_MAP = {
-    "0050.TW": "元大台灣50 (市值權值)",
-    "0051.TW": "元大中型100 (中小型股)",
-    "0052.TW": "富邦科技 (電子主軸)",
-    "0053.TW": "元大電子 (半導體/電子)",
-    "0055.TW": "元大金融 (金融族群)",
-    "0056.TW": "元大高股息 (防禦型資金)",
-    "006208.TW": "富邦台50 (市值權值)",
-    "00878.TW": "國泰永續高股息 (高股息)",
-    "00919.TW": "群益台灣精選高息 (高股息)",
-    "00929.TW": "復華台灣科技優息 (科技高股息)",
+    "^TWII": "台股加權大盤",
+    "0050.TW": "元大台灣50",
+    "0056.TW": "元大高股息",
+    "00878.TW": "國泰永續高股息",
+    "00919.TW": "群益台灣精選高息",
+    "00929.TW": "復華台灣科技優息",
+    "00940.TW": "元大台灣價值高息",
+    "0052.TW": "富邦科技",
+    "0055.TW": "元大金融",
+    "0051.TW": "元大中型100",
 }
 
-# 3. 側邊欄切換選單
-st.sidebar.header("⚙️ 檢視設定")
+# 3. 側邊欄控制項
+st.sidebar.header("⚙️ 篩選與模式設定")
+
 view_mode = st.sidebar.selectbox(
-    "請選擇分析目標種類：",
-    ["產業龍頭個股", "主題型/產業 ETF", "全部標的綜合比較"]
+    "請選擇分析目標：",
+    ["🔥 證交所當日爆量熱門股 (自動更新)", "📊 核心主題型/產業 ETF", "➕ 僅檢視自訂股票"]
 )
 
-# 根據選單決定要下載的標的清單
-if view_mode == "產業龍頭個股":
-    target_map = {**{"^TWII": "台股加權大盤"}, **STOCKS_MAP}
-elif view_mode == "主題型/產業 ETF":
-    target_map = {**{"^TWII": "台股加權大盤"}, **ETF_MAP}
-else:
-    target_map = {**{"^TWII": "台股加權大盤"}, **STOCKS_MAP, **ETF_MAP}
+# 手動輸入股票代碼
+custom_ticker = st.sidebar.text_input("手動新增關注股票 (如：2357.TW 或 2357)：", "")
 
-@st.cache_data(ttl=300) # 快取 5 分鐘
+# 根據選單準備下載標的
+if "當日爆量熱門股" in view_mode:
+    target_map = get_twse_top_volume_tickers()
+elif "主題型" in view_mode:
+    target_map = ETF_MAP.copy()
+else:
+    target_map = {"^TWII": "台股加權大盤"}
+
+# 加入自訂股票
+if custom_ticker.strip():
+    code = custom_ticker.strip().upper()
+    if not code.endswith(".TW") and not code.startswith("^"):
+        code += ".TW"
+    target_map[code] = f"自訂標的 ({code})"
+
+# 4. 下載歷史數據並計算動能
+@st.cache_data(ttl=300)
 def fetch_data(tickers):
     data = yf.download(tickers, period="20d", interval="1d", progress=False)
-    return data
+    # 紀錄擷取數據的時間 (台灣時間 UTC+8)
+    tw_tz = pytz.timezone('Asia/Taipei')
+    fetch_time = datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M:%S")
+    return data, fetch_time
 
-# 4. 執行資料擷取與運算
 try:
-    data = fetch_data(list(target_map.keys()))
+    with st.spinner("正在自動掃描當日市場熱錢焦點與動能..."):
+        data, fetch_time = fetch_data(list(target_map.keys()))
     
     if isinstance(data.columns, pd.MultiIndex):
         close_prices = data["Close"]
@@ -80,27 +106,35 @@ try:
     if len(close_prices) < 6:
         st.warning("目前市場數據連線較慢，請重新整理頁面。")
     else:
+        # 最新交易日日期 (例如：2026-09-17)
+        latest_market_date = close_prices.index[-1].strftime("%Y-%m-%d")
+
+        # 顯示資料時間提示欄
+        st.info(f"🕒 **數據抓取時間**：`{fetch_time} (台灣時間)` ｜ 📅 **最新市場交易日**：`{latest_market_date}`")
+
         # 計算動能指標
         ret_3d = (close_prices.iloc[-1] / close_prices.iloc[-4] - 1) * 100
         ret_5d = (close_prices.iloc[-1] / close_prices.iloc[-6] - 1) * 100
         
         # 5日成交均量
         vol_5d_avg = volumes.tail(5).mean()
-        # 最新一日成交量相對於 5 日均量的倍數
         vol_ratio = volumes.iloc[-1] / vol_5d_avg
         
-        market_3d = ret_3d["^TWII"]
+        market_3d = ret_3d["^TWII"] if "^TWII" in ret_3d else 0.0
 
-        # 組合資料表
+        # 組合數據表
         results = []
         for ticker, name in target_map.items():
-            if ticker == "^TWII":
+            if ticker == "^TWII" or ticker not in close_prices.columns:
                 continue
                 
             r3 = ret_3d[ticker]
             r5 = ret_5d[ticker]
             vr = vol_ratio[ticker]
             
+            if pd.isna(r3) or pd.isna(vr):
+                continue
+
             rs_status = "強於大盤" if r3 > market_3d else "弱於大盤"
             
             if r3 > 1.5 and vr > 1.2:
@@ -114,7 +148,7 @@ try:
                 
             results.append({
                 "代號": ticker,
-                "標的名稱": name,
+                "股票/標的名稱": name,
                 "3日漲跌(%)": round(float(r3), 2),
                 "5日漲跌(%)": round(float(r5), 2),
                 "量比(較5日均量)": round(float(vr), 2),
@@ -124,35 +158,38 @@ try:
             
         df = pd.DataFrame(results).sort_values(by="3日漲跌(%)", ascending=False)
 
-        # 5. 網頁視覺化呈現
-        top3 = df.head(3)
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("🔥 最強資金聚焦首選", top3.iloc[0]["標的名稱"], f"{top3.iloc[0]['3日漲跌(%)']}%")
-        with col2:
-            st.metric("🥈 資金流向第二名", top3.iloc[1]["標的名稱"], f"{top3.iloc[1]['3日漲跌(%)']}%")
-        with col3:
-            st.metric("📈 加權大盤 3日變動", "加權指數", f"{round(float(market_3d), 2)}%")
+        # 5. 視覺化呈現
+        if not df.empty:
+            top3 = df.head(3)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("🔥 當前熱錢最強首選", top3.iloc[0]["股票/標的名稱"], f"{top3.iloc[0]['3日漲跌(%)']}%")
+            with col2:
+                if len(top3) > 1:
+                    st.metric("🥈 熱錢強勢第二名", top3.iloc[1]["股票/標的名稱"], f"{top3.iloc[1]['3日漲跌(%)']}%")
+            with col3:
+                st.metric("📈 加權大盤 3日變動", "加權指數", f"{round(float(market_3d), 2)}%")
 
-        st.markdown("---")
+            st.markdown("---")
 
-        # 動能矩陣散佈圖
-        st.subheader(f"📌 {view_mode} - 資金動能矩陣 (量價分佈)")
-        fig = px.scatter(
-            df, 
-            x="量比(較5日均量)", 
-            y="3日漲跌(%)", 
-            color="資金診斷",
-            text="標的名稱",
-            size_max=30,
-            title="右上角區域（大漲+爆量）代表目前資金熱錢核心"
-        )
-        fig.update_traces(textposition='top center')
-        st.plotly_chart(fig, use_container_width=True)
+            # 散佈圖
+            st.subheader(f"📌 {view_mode} - 動態資金分布矩陣 (量價分佈)")
+            fig = px.scatter(
+                df, 
+                x="量比(較5日均量)", 
+                y="3日漲跌(%)", 
+                color="資金診斷",
+                text="股票/標的名稱",
+                size_max=30,
+                hover_data=["代號", "5日漲跌(%)"],
+                title="右上角區域（大漲+爆量）代表當天全台股熱錢極度集中之標的"
+            )
+            fig.update_traces(textposition='top center')
+            st.plotly_chart(fig, use_container_width=True)
 
-        # 詳細數據資料表
-        st.subheader(f"📋 {view_mode} - 數據排行明細")
-        st.dataframe(df, use_container_width=True)
+            # 詳細數據資料表
+            st.subheader(f"📋 今日成交熱門股排行榜明細 (共 {len(df)} 支)")
+            st.dataframe(df, use_container_width=True)
 
 except Exception as e:
     st.error(f"數據載入失敗，請稍後重試或重新整理：{e}")
