@@ -7,7 +7,7 @@ from datetime import datetime
 import pytz
 
 # 1. 設定網頁標題與寬度 layout
-st.set_page_config(page_title="台股動態熱錢與全市場資金輪動儀表板", layout="wide", page_icon="📈")
+st.set_page_config(page_title="台股動態熱錢與資金輪動儀表板", layout="wide", page_icon="📈")
 
 st.title("🔥 台股當日動態熱錢與資金輪動監控儀表板")
 st.caption("自動抓取台灣證交所 (TWSE) 當日成交量排行榜與熱門概念股，即時分析熱錢動能")
@@ -62,29 +62,33 @@ view_mode = st.sidebar.selectbox(
     ["🔥 證交所當日爆量熱門股 (自動更新)", "📊 核心主題型/產業 ETF", "➕ 僅檢視自訂股票"]
 )
 
-# 手動輸入股票代碼
-custom_ticker = st.sidebar.text_input("手動新增關注股票 (如：2357.TW 或 2357)：", "")
+# 手動輸入股票代碼（僅在選取「僅檢視自訂股票」時或需自行新增時提供輸入框）
+custom_tickers_input = st.sidebar.text_input(
+    "手動輸入自訂股票代碼 (多筆可用逗點分隔，例如：2357, 2454)：", 
+    value="2357.TW"
+)
 
-# 根據選單準備下載標的
+# 根據選單模式嚴格分離標的，手動輸入標的不混入其他頁面
 if "當日爆量熱門股" in view_mode:
     target_map = get_twse_top_volume_tickers()
 elif "主題型" in view_mode:
     target_map = ETF_MAP.copy()
 else:
+    # 僅檢視自訂股票模式
     target_map = {"^TWII": "台股加權大盤"}
-
-# 加入自訂股票
-if custom_ticker.strip():
-    code = custom_ticker.strip().upper()
-    if not code.endswith(".TW") and not code.startswith("^"):
-        code += ".TW"
-    target_map[code] = f"自訂標的 ({code})"
+    if custom_tickers_input.strip():
+        items = custom_tickers_input.replace("，", ",").split(",")
+        for raw_item in items:
+            code = raw_item.strip().upper()
+            if code:
+                if not code.endswith(".TW") and not code.startswith("^"):
+                    code += ".TW"
+                target_map[code] = f"自訂標的 ({code})"
 
 # 4. 下載歷史數據並計算動能
 @st.cache_data(ttl=300)
 def fetch_data(tickers):
     data = yf.download(tickers, period="20d", interval="1d", progress=False)
-    # 紀錄擷取數據的時間 (台灣時間 UTC+8)
     tw_tz = pytz.timezone('Asia/Taipei')
     fetch_time = datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M:%S")
     return data, fetch_time
@@ -106,10 +110,9 @@ try:
     if len(close_prices) < 6:
         st.warning("目前市場數據連線較慢，請重新整理頁面。")
     else:
-        # 最新交易日日期 (例如：2026-09-17)
         latest_market_date = close_prices.index[-1].strftime("%Y-%m-%d")
 
-        # 顯示資料時間提示欄
+        # 顯示數據時間標示
         st.info(f"🕒 **數據抓取時間**：`{fetch_time} (台灣時間)` ｜ 📅 **最新市場交易日**：`{latest_market_date}`")
 
         # 計算動能指標
@@ -182,14 +185,16 @@ try:
                 text="股票/標的名稱",
                 size_max=30,
                 hover_data=["代號", "5日漲跌(%)"],
-                title="右上角區域（大漲+爆量）代表當天全台股熱錢極度集中之標的"
+                title="右上角區域（大漲+爆量）代表當天熱錢極度集中之標的"
             )
             fig.update_traces(textposition='top center')
             st.plotly_chart(fig, use_container_width=True)
 
             # 詳細數據資料表
-            st.subheader(f"📋 今日成交熱門股排行榜明細 (共 {len(df)} 支)")
+            st.subheader(f"📋 數據排行榜明細 (共 {len(df)} 支)")
             st.dataframe(df, use_container_width=True)
+        else:
+            st.info("沒有可顯示的標的，請於左側選單輸入自訂股票代號。")
 
 except Exception as e:
     st.error(f"數據載入失敗，請稍後重試或重新整理：{e}")
