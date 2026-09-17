@@ -21,34 +21,40 @@ SECTOR_MAP = {
     "006208.TW": "富邦台50",
 }
 
-@st.cache_data(ttl=300) # 快取數據 5 分鐘
+@st.cache_data(ttl=300) # 快取 5 分鐘
 def fetch_data():
     tickers = list(SECTOR_MAP.keys())
-    # 改抓取最近 3 個月的日 K 資料，確保有足夠交易日
-    data = yf.download(tickers, period="3m", interval="1d", progress=False)
+    # 抓取最近 20 個交易日
+    data = yf.download(tickers, period="20d", interval="1d", progress=False)
     return data
 
 # 3. 執行資料擷取與運算
 try:
     data = fetch_data()
     
-    # yfinance 回傳多重索引處理
+    # 針對 yfinance 新版 MultiIndex 結構進行相容處理
     if isinstance(data.columns, pd.MultiIndex):
-        close_prices = data["Close"].dropna(how="all")
-        volumes = data["Volume"].dropna(how="all")
+        close_prices = data["Close"]
+        volumes = data["Volume"]
     else:
-        close_prices = data["Close"].dropna()
-        volumes = data["Volume"].dropna()
+        close_prices = data["Close"]
+        volumes = data["Volume"]
 
-    # 檢查交易日數量是否充足
+    # 移除全為空的日期列，並填充單一欄位遺漏值
+    close_prices = close_prices.dropna(how="all").ffill()
+    volumes = volumes.dropna(how="all").fillna(0)
+
     if len(close_prices) < 6:
-        st.error("歷史交易資料天數不足（少於 6 天），請稍後再試。")
+        st.warning("目前市場數據連線較慢，請重新整理頁面。")
     else:
-        # 計算動能指標 (安全取值)
+        # 計算動能指標
         ret_3d = (close_prices.iloc[-1] / close_prices.iloc[-4] - 1) * 100
         ret_5d = (close_prices.iloc[-1] / close_prices.iloc[-6] - 1) * 100
-        vol_5d_avg = volumes.rolling(5).mean()
-        vol_ratio = (volumes.iloc[-1] / vol_5d_avg.iloc[-1])
+        
+        # 5日成交均量
+        vol_5d_avg = volumes.tail(5).mean()
+        # 最新一日成交量相對於 5 日均量的倍數
+        vol_ratio = volumes.iloc[-1] / vol_5d_avg
         
         market_3d = ret_3d["^TWII"]
 
@@ -116,4 +122,4 @@ try:
         st.dataframe(df, use_container_width=True)
 
 except Exception as e:
-    st.error(f"數據載入失敗或美股盤後更新中，請稍後重試：{e}")
+    st.error(f"數據載入失敗，請稍後重試或重新整理：{e}")
