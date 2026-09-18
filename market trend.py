@@ -17,7 +17,6 @@ st.set_page_config(
 # 注入自訂 CSS 優化側邊欄與行動裝置閱讀體驗
 st.markdown("""
     <style>
-    /* 優化行動端邊距 */
     .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
@@ -81,7 +80,15 @@ def fetch_yahoo_detail(symbol):
     except Exception:
         return None
 
-def evaluate_stock_full(symbol, min_score_filter=0, min_vol_actual=0, min_vol_est=0):
+def evaluate_stock_full(
+    symbol, 
+    min_score_filter=0, 
+    min_vol_actual=0, 
+    min_vol_est=0,
+    min_tech=0,
+    min_chip=0,
+    min_fund=0
+):
     data = fetch_yahoo_detail(symbol)
     if not data or len(data["close"]) < 20:
         return None
@@ -164,7 +171,13 @@ def evaluate_stock_full(symbol, min_score_filter=0, min_vol_actual=0, min_vol_es
 
     total_score = tech_score + chip_score + fund_score
 
-    if total_score < min_score_filter:
+    # 分別過濾三個維度的獨立分數與總分
+    if (
+        tech_score < min_tech or 
+        chip_score < min_chip or 
+        fund_score < min_fund or 
+        total_score < min_score_filter
+    ):
         return None
 
     # 風控進出場點位推算
@@ -237,10 +250,18 @@ with st.sidebar:
         min_score = st.slider("最低健檢總分門檻", 50, 100, 60)
 
     elif app_mode == "🔍 號碼區間掃描":
-        st.subheader("⚙️ 區間與篩選門檻設定")
-        min_score_range = st.slider("健檢分數區間", 50, 100, (60, 100))
+        st.subheader("⚙️ 三維度得分門檻 (可各自獨立微調)")
+        
+        # 三維度獨立分數調整選單
+        min_tech = st.slider("📈 技術面最低分 (滿分35)", 0, 35, 15)
+        min_chip = st.slider("📊 籌碼面最低分 (滿分35)", 0, 35, 20)
+        min_fund = st.slider("🛡️ 位階面最低分 (滿分30)", 0, 30, 10)
+        
+        calculated_min_total = min_tech + min_chip + min_fund
+        st.caption(f"💡 目前三維度組合最低門檻總分：**{calculated_min_total} 分**")
 
-        # 新增：量能篩選門檻與連動邏輯
+        st.divider()
+        st.subheader("⚙️ 量能篩選門檻")
         col_vol1, col_vol2 = st.columns(2)
         with col_vol1:
             min_vol_actual = st.number_input(
@@ -252,14 +273,13 @@ with st.sidebar:
             )
         
         with col_vol2:
-            # 確保預估成交量下限「永遠大於或等於」當日成交量下限
             min_vol_est_default = max(1000, min_vol_actual)
             min_vol_est = st.number_input(
                 "預估成交量下限(張)", 
-                min_value=min_vol_actual, # 設定 min_value 為當日成交量
+                min_value=min_vol_actual,
                 value=min_vol_est_default, 
                 step=100,
-                help="系統會自動連線確保預估成交量下限不低於當日成交量"
+                help="預估成交量下限自動確保大於或等於當日成交量"
             )
 
         st.divider()
@@ -351,7 +371,7 @@ elif app_mode == "🔍 號碼區間掃描":
         else:
             symbols = [f"{c}.TW" for c in range(start_code, end_code + 1)]
 
-        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的，門檻：當日量 $\ge$ {min_vol_actual} 張 | 預估量 $\ge$ {min_vol_est} 張...")
+        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的，門檻：技術 $\ge$ {min_tech}分 | 籌碼 $\ge$ {min_chip}分 | 位階 $\ge$ {min_fund}分 | 當日量 $\ge$ {min_vol_actual} 張 | 預估量 $\ge$ {min_vol_est} 張...")
         progress_bar = st.progress(0)
 
         results = []
@@ -360,9 +380,12 @@ elif app_mode == "🔍 號碼區間掃描":
             res = evaluate_stock_full(
                 symbol, 
                 min_vol_actual=min_vol_actual, 
-                min_vol_est=min_vol_est
+                min_vol_est=min_vol_est,
+                min_tech=min_tech,
+                min_chip=min_chip,
+                min_fund=min_fund
             )
-            if res and min_score_range[0] <= res["健檢總分"] <= min_score_range[1]:
+            if res:
                 results.append(res)
 
         progress_bar.empty()
@@ -373,14 +396,14 @@ elif app_mode == "🔍 號碼區間掃描":
             st.dataframe(df, use_container_width=True, hide_index=True)
 
             for item in results:
-                with st.expander(f"🌟 【{item['代號']} {item['名稱']}】 健檢總分：{item['健檢總分']} 分"):
+                with st.expander(f"🌟 【{item['代號']} {item['名稱']}】 健檢總分：{item['健檢總分']} 分 (技術:{item['技術得分']} | 籌碼:{item['籌碼得分']} | 位階:{item['位階得分']})"):
                     col1, col2, col3, col4 = st.columns(4)
                     col1.metric("最新價", f"{item['現價']} 元", f"{item['漲跌幅(%)']}%")
                     col2.metric("成交張數", f"{item['當日成交張數']} 張", f"預估 {item['預估成交張數']} 張")
                     col3.metric("建議進場區", item["建議卡位進場區"])
                     col4.metric("目標 / 停損", f"{item['第一目標價']} / {item['停損防守價']}")
         else:
-            st.warning("💡 當前條件下無符合標的，可嘗試調低成交量或分數門檻。")
+            st.warning("💡 當前條件下無符合標的，可嘗試調低各項分數或成交量門檻。")
 
 # -----------------------------------------------------------------------------
 # 模式 3：單股精準診斷
