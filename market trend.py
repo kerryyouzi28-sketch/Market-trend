@@ -14,6 +14,17 @@ st.set_page_config(
     layout="wide"
 )
 
+# 注入自訂 CSS 優化側邊欄與行動裝置閱讀體驗
+st.markdown("""
+    <style>
+    /* 優化行動端邊距 */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("🔥 台股『當日熱錢掃描 x 三維度健檢風控』系統")
 st.caption("結合證交所當日爆量熱錢、三維度評分（技術/籌碼/位階）與即時進出場風控點位計算")
 
@@ -70,7 +81,7 @@ def fetch_yahoo_detail(symbol):
     except Exception:
         return None
 
-def evaluate_stock_full(symbol, min_score_filter=0):
+def evaluate_stock_full(symbol, min_score_filter=0, min_vol_actual=0, min_vol_est=0):
     data = fetch_yahoo_detail(symbol)
     if not data or len(data["close"]) < 20:
         return None
@@ -85,6 +96,10 @@ def evaluate_stock_full(symbol, min_score_filter=0):
     latest_price = closes[-1]
     vol_shares = int(volumes[-1] / 1000) if volumes[-1] > 0 else 0
     est_vol_shares = estimate_daily_volume(vol_shares)
+
+    # 檢查量能條件門檻
+    if vol_shares < min_vol_actual or est_vol_shares < min_vol_est:
+        return None
 
     code = symbol.split(".")[0]
     name = data["name"]
@@ -209,6 +224,8 @@ def get_twse_top_tickers():
 
 with st.sidebar:
     st.header("🎯 操作選單")
+    st.caption("💡 選取完畢請點擊左上方 「✕」 關閉選單，以獲得最佳觀看體驗")
+    
     app_mode = st.radio(
         "選擇功能模式", 
         ("🔥 證交所當日熱錢綜合診斷", "🔍 號碼區間掃描", "🩺 單股精準診斷")
@@ -217,12 +234,35 @@ with st.sidebar:
 
     if app_mode == "🔥 證交所當日熱錢綜合診斷":
         st.subheader("⚙️ 熱錢健檢門檻")
-        min_score = st.slider("最低健檢總分門檻", 50, 100, 60) # 預設下修至 60 分避免門檻太高
+        min_score = st.slider("最低健檢總分門檻", 50, 100, 60)
 
     elif app_mode == "🔍 號碼區間掃描":
-        st.subheader("⚙️ 區間篩選門檻")
+        st.subheader("⚙️ 區間與篩選門檻設定")
         min_score_range = st.slider("健檢分數區間", 50, 100, (60, 100))
 
+        # 新增：量能篩選門檻與連動邏輯
+        col_vol1, col_vol2 = st.columns(2)
+        with col_vol1:
+            min_vol_actual = st.number_input(
+                "當日成交量下限(張)", 
+                min_value=0, 
+                value=500, 
+                step=100,
+                key="min_vol_act"
+            )
+        
+        with col_vol2:
+            # 確保預估成交量下限「永遠大於或等於」當日成交量下限
+            min_vol_est_default = max(1000, min_vol_actual)
+            min_vol_est = st.number_input(
+                "預估成交量下限(張)", 
+                min_value=min_vol_actual, # 設定 min_value 為當日成交量
+                value=min_vol_est_default, 
+                step=100,
+                help="系統會自動連線確保預估成交量下限不低於當日成交量"
+            )
+
+        st.divider()
         scan_mode = st.radio(
             "號碼區間選擇",
             (
@@ -311,13 +351,17 @@ elif app_mode == "🔍 號碼區間掃描":
         else:
             symbols = [f"{c}.TW" for c in range(start_code, end_code + 1)]
 
-        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的...")
+        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的，門檻：當日量 $\ge$ {min_vol_actual} 張 | 預估量 $\ge$ {min_vol_est} 張...")
         progress_bar = st.progress(0)
 
         results = []
         for idx, symbol in enumerate(symbols):
             progress_bar.progress((idx + 1) / len(symbols))
-            res = evaluate_stock_full(symbol)
+            res = evaluate_stock_full(
+                symbol, 
+                min_vol_actual=min_vol_actual, 
+                min_vol_est=min_vol_est
+            )
             if res and min_score_range[0] <= res["健檢總分"] <= min_score_range[1]:
                 results.append(res)
 
@@ -327,8 +371,16 @@ elif app_mode == "🔍 號碼區間掃描":
             df = pd.DataFrame(results).sort_values(by="健檢總分", ascending=False).reset_index(drop=True)
             st.success(f"🎉 掃描完成！共有 {len(df)} 檔符合門檻標的：")
             st.dataframe(df, use_container_width=True, hide_index=True)
+
+            for item in results:
+                with st.expander(f"🌟 【{item['代號']} {item['名稱']}】 健檢總分：{item['健檢總分']} 分"):
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("最新價", f"{item['現價']} 元", f"{item['漲跌幅(%)']}%")
+                    col2.metric("成交張數", f"{item['當日成交張數']} 張", f"預估 {item['預估成交張數']} 張")
+                    col3.metric("建議進場區", item["建議卡位進場區"])
+                    col4.metric("目標 / 停損", f"{item['第一目標價']} / {item['停損防守價']}")
         else:
-            st.warning("💡 當前條件下無符合標的，可嘗試調低分數門檻。")
+            st.warning("💡 當前條件下無符合標的，可嘗試調低成交量或分數門檻。")
 
 # -----------------------------------------------------------------------------
 # 模式 3：單股精準診斷
