@@ -9,12 +9,12 @@ import pytz
 
 # 1. 網頁設定
 st.set_page_config(
-    page_title="台股熱錢掃描與三維度選股診斷系統", 
+    page_title="台美股動態熱錢與三維度選股診斷系統", 
     page_icon="📈", 
     layout="wide"
 )
 
-# 注入自訂 CSS 優化側邊欄與行動裝置閱讀體驗
+# 注入 CSS 優化行動裝置體驗
 st.markdown("""
     <style>
     .block-container {
@@ -24,28 +24,43 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 台股『當日熱錢掃描 x 三維度健檢風控』系統")
-st.caption("結合證交所當日爆量熱錢、三維度評分（技術/籌碼/位階）與即時進出場風控點位計算")
+st.title("🌐 台美股『當日熱錢掃描 x 三維度健檢風控』系統")
+st.caption("支援台灣股市與美國股市，結合熱錢動能、三維度評分（技術/籌碼/位階）與風控進出場點位計算")
+
+# 美股核心熱門標的池 (備援/預設)
+US_TOP_TICKERS = [
+    "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "PLTR", 
+    "AVGO", "NFLX", "INTC", "SMCI", "COIN", "MSTR", "BAC", "JPM", "DIS",
+    "QQQ", "SPY", "SOXX", "IWM"
+]
 
 # -----------------------------------------------------------------------------
 # 核心演算法函數
 # -----------------------------------------------------------------------------
 
-def estimate_daily_volume(volume_so_far):
-    tw_tz = timezone(timedelta(hours=8))
-    now_tw = datetime.now(tw_tz)
+def estimate_daily_volume(volume_so_far, market_type="TW"):
+    """盤中預估成交量計算 (支援台股與美股交易時間)"""
+    if market_type == "TW":
+        tz = timezone(timedelta(hours=8))
+        now = datetime.now(tz)
+        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        market_close = now.replace(hour=13, minute=30, second=0, microsecond=0)
+        total_minutes = 270.0
+    else:
+        tz = timezone(timedelta(hours=-4)) # 美東時間
+        now = datetime.now(tz)
+        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        total_minutes = 390.0
 
-    market_open = now_tw.replace(hour=9, minute=0, second=0, microsecond=0)
-    market_close = now_tw.replace(hour=13, minute=30, second=0, microsecond=0)
-
-    if now_tw < market_open or now_tw >= market_close:
+    if now < market_open or now >= market_close:
         return volume_so_far
 
-    elapsed_minutes = (now_tw - market_open).total_seconds() / 60.0
+    elapsed_minutes = (now - market_open).total_seconds() / 60.0
     if elapsed_minutes < 5:
         return volume_so_far
 
-    return int(volume_so_far * (270.0 / elapsed_minutes))
+    return int(volume_so_far * (total_minutes / elapsed_minutes))
 
 @st.cache_data(ttl=300)
 def fetch_yahoo_detail(symbol):
@@ -58,7 +73,7 @@ def fetch_yahoo_detail(symbol):
             data = json.loads(resp.read().decode("utf-8"))
             result = data["chart"]["result"][0]
             meta = result["meta"]
-            stock_name = meta.get("shortName") or meta.get("symbol") or symbol
+            stock_name = meta.get("shortName") or meta.get("longName") or meta.get("symbol") or symbol
 
             quote = result["indicators"]["quote"][0]
             closes = [c for c in quote["close"] if c is not None]
@@ -82,6 +97,7 @@ def fetch_yahoo_detail(symbol):
 
 def evaluate_stock_full(
     symbol, 
+    market_type="TW",
     min_score_filter=0, 
     min_vol_actual=0, 
     min_vol_est=0,
@@ -100,11 +116,12 @@ def evaluate_stock_full(
         data["low"],
         data["volume"],
     )
-    latest_price = closes[-1]
-    vol_shares = int(volumes[-1] / 1000) if volumes[-1] > 0 else 0
-    est_vol_shares = estimate_daily_volume(vol_shares)
+    latest_price = round(closes[-1], 2)
+    
+    # 台股單位為張 (1,000股)，美股直接為股
+    vol_shares = int(volumes[-1] / 1000) if market_type == "TW" else int(volumes[-1])
+    est_vol_shares = estimate_daily_volume(vol_shares, market_type)
 
-    # 檢查量能條件門檻
     if vol_shares < min_vol_actual or est_vol_shares < min_vol_est:
         return None
 
@@ -144,7 +161,7 @@ def evaluate_stock_full(
 
     # 2. 籌碼量能 (35%)
     chip_score = 0
-    recent_vols = [v / 1000 for v in volumes[-6:-1]]
+    recent_vols = [v / 1000 if market_type == "TW" else v for v in volumes[-6:-1]]
     vol_5ma = sum(recent_vols) / len(recent_vols) if len(recent_vols) > 0 else 0
     vol_ratio = round(vol_shares / vol_5ma, 2) if vol_5ma > 0 else 1.0
 
@@ -171,7 +188,6 @@ def evaluate_stock_full(
 
     total_score = tech_score + chip_score + fund_score
 
-    # 分別過濾三個維度的獨立分數與總分
     if (
         tech_score < min_tech or 
         chip_score < min_chip or 
@@ -191,19 +207,22 @@ def evaluate_stock_full(
     reward = target_price - entry_high
     rr_ratio = round(reward / risk, 2)
 
+    unit_price = "元" if market_type == "TW" else "美元"
+    unit_vol = "張" if market_type == "TW" else "股"
+
     return {
-        "代號": code,
+        "代號": code if market_type == "TW" else symbol.upper(),
         "名稱": name,
-        "現價": latest_price,
+        f"現價({unit_price})": latest_price,
         "漲跌幅(%)": change_pct,
         "健檢總分": total_score,
         "量能倍數": vol_ratio,
-        "建議卡位進場區": f"{entry_low:.2f} ~ {entry_high:.2f}",
-        "第一目標價": target_price,
-        "停損防守價": stop_loss,
+        "建議卡位進場區": f"{entry_low:.2f} ~ {entry_high:.2f} {unit_price}",
+        "第一目標價": f"{target_price:.2f} {unit_price}",
+        "停損防守價": f"{stop_loss:.2f} {unit_price}",
         "風報比(R/R)": rr_ratio,
-        "當日成交張數": vol_shares,
-        "預估成交張數": est_vol_shares,
+        f"當日成交量({unit_vol})": f"{vol_shares:,}",
+        f"預估成交量({unit_vol})": f"{est_vol_shares:,}",
         "技術得分": tech_score,
         "籌碼得分": chip_score,
         "位階得分": fund_score,
@@ -232,105 +251,103 @@ def get_twse_top_tickers():
     return symbols
 
 # -----------------------------------------------------------------------------
-# 側邊欄與模式分流
+# 側邊欄與市場模式分流
 # -----------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("🎯 操作選單")
+    st.header("🌐 市場選擇")
+    target_market = st.radio("請選擇目標市場：", ("🇹🇼 台灣股市 (TWSE)", "🇺🇸 美國股市 (US)"))
+    market_code = "TW" if "台灣" in target_market else "US"
+
+    st.divider()
+    st.header("🎯 功能選單")
     st.caption("💡 選取完畢請點擊左上方 「✕」 關閉選單，以獲得最佳觀看體驗")
     
     app_mode = st.radio(
         "選擇功能模式", 
-        ("🔥 證交所當日熱錢綜合診斷", "🔍 號碼區間掃描", "🩺 單股精準診斷")
+        ("🔥 當日熱錢焦點綜合診斷", "🔍 號碼區間/清單掃描", "🩺 單股精準診斷")
     )
     st.divider()
 
-    if app_mode == "🔥 證交所當日熱錢綜合診斷":
+    if app_mode == "🔥 當日熱錢焦點綜合診斷":
         st.subheader("⚙️ 熱錢健檢門檻")
         min_score = st.slider("最低健檢總分門檻", 50, 100, 60)
 
-    elif app_mode == "🔍 號碼區間掃描":
-        st.subheader("⚙️ 三維度得分門檻 (可各自獨立微調)")
-        
-        # 三維度獨立分數調整選單
+    elif app_mode == "🔍 號碼區間/清單掃描":
+        st.subheader("⚙️ 三維度得分門檻")
         min_tech = st.slider("📈 技術面最低分 (滿分35)", 0, 35, 15)
         min_chip = st.slider("📊 籌碼面最低分 (滿分35)", 0, 35, 20)
         min_fund = st.slider("🛡️ 位階面最低分 (滿分30)", 0, 30, 10)
-        
         calculated_min_total = min_tech + min_chip + min_fund
-        st.caption(f"💡 目前三維度組合最低門檻總分：**{calculated_min_total} 分**")
+        st.caption(f"💡 最低門檻總分：**{calculated_min_total} 分**")
 
         st.divider()
-        st.subheader("⚙️ 量能篩選門檻")
+        st.subheader("⚙️ 量能與標的範圍")
         col_vol1, col_vol2 = st.columns(2)
         with col_vol1:
-            min_vol_actual = st.number_input(
-                "當日成交量下限(張)", 
-                min_value=0, 
-                value=500, 
-                step=100,
-                key="min_vol_act"
-            )
+            default_vol = 500 if market_code == "TW" else 100000
+            min_vol_actual = st.number_input("當日成交量下限", min_value=0, value=default_vol, step=100)
         
         with col_vol2:
-            min_vol_est_default = max(1000, min_vol_actual)
-            min_vol_est = st.number_input(
-                "預估成交量下限(張)", 
-                min_value=min_vol_actual,
-                value=min_vol_est_default, 
-                step=100,
-                help="預估成交量下限自動確保大於或等於當日成交量"
-            )
+            min_vol_est_default = max(default_vol * 2, min_vol_actual)
+            min_vol_est = st.number_input("預估成交量下限", min_value=min_vol_actual, value=min_vol_est_default, step=100)
 
         st.divider()
-        scan_mode = st.radio(
-            "號碼區間選擇",
-            (
-                "2300-2399 (晶圓/代工/組裝)",
-                "2400-2499 (IC設計/記憶體)",
-                "3000-3399 (散熱/PCB/零組件)",
-                "6100-6699 (櫃買設備/IP股)",
-                "自訂號碼區間",
-            ),
-        )
-        if scan_mode == "自訂號碼區間":
-            start_code = st.number_input("起始號碼", value=2300, step=10)
-            end_code = st.number_input("結束號碼", value=2350, step=10)
+        if market_code == "TW":
+            scan_mode = st.radio(
+                "號碼區間選擇",
+                (
+                    "2300-2399 (晶圓/代工/組裝)",
+                    "2400-2499 (IC設計/記憶體)",
+                    "3000-3399 (散熱/PCB/零組件)",
+                    "6100-6699 (櫃買設備/IP股)",
+                    "自訂號碼區間",
+                ),
+            )
+            if scan_mode == "自訂號碼區間":
+                start_code = st.number_input("起始號碼", value=2300, step=10)
+                end_code = st.number_input("結束號碼", value=2350, step=10)
+        else:
+            custom_us_list = st.text_area(
+                "輸入美股代號清單 (多筆用逗點分隔)：",
+                value="NVDA, TSLA, AAPL, AMD, PLTR, MSFT, AMZN, GOOGL, META, AVGO, COIN, MSTR, QQQ, SPY",
+                height=100
+            )
 
     else:
-        single_code = st.text_input("輸入股票代號", value="2408").strip()
+        default_stock = "2408" if market_code == "TW" else "NVDA"
+        single_code = st.text_input(f"輸入{target_market}代號", value=default_stock).strip()
 
 # -----------------------------------------------------------------------------
-# 模式 1：證交所當日熱錢綜合診斷
+# 模式 1：當日熱錢焦點綜合診斷
 # -----------------------------------------------------------------------------
-if app_mode == "🔥 證交所當日熱錢綜合診斷":
-    st.subheader("🔥 證交所當日爆量熱錢 — 三維度綜合診斷報告")
+if app_mode == "🔥 當日熱錢焦點綜合診斷":
+    st.subheader(f"{target_market} — 當日爆量熱錢三維度綜合診斷報告")
     
     tw_tz = pytz.timezone('Asia/Taipei')
     fetch_time = datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M:%S")
-    st.info(f"🕒 **分析時間**：`{fetch_time} (台灣時間)` ｜ 正在自動連線證交所熱門榜進行健檢...")
+    st.info(f"🕒 **分析時間**：`{fetch_time} (台灣時間)` ｜ 正在自動掃描市場熱門爆量焦點...")
 
-    with st.spinner("正在抓取與計算全市場熱錢健檢分數..."):
-        top_symbols = get_twse_top_tickers()
+    with st.spinner("正在連線計算全市場熱錢健檢分數..."):
+        top_symbols = get_twse_top_tickers() if market_code == "TW" else US_TOP_TICKERS
         results = []
         for symbol in top_symbols:
-            res = evaluate_stock_full(symbol, min_score_filter=min_score)
+            res = evaluate_stock_full(symbol, market_type=market_code, min_score_filter=min_score)
             if res:
                 results.append(res)
 
     if results:
         df = pd.DataFrame(results).sort_values(by="健檢總分", ascending=False).reset_index(drop=True)
         
-        # 散佈圖
         st.subheader("📌 熱錢動能與健檢分數矩陣 (右上角為最強優質股)")
         fig = px.scatter(
             df,
             x="量能倍數",
             y="健檢總分",
             color="漲跌幅(%)",
-            text="名稱",
+            text="代號",
             color_continuous_scale="Reds",
-            hover_data=["代號", "現價", "風報比(R/R)"],
+            hover_data=["名稱", "風報比(R/R)"],
             size_max=18
         )
         fig.add_vline(x=1.0, line_dash="dash", line_color="gray", opacity=0.7)
@@ -339,39 +356,46 @@ if app_mode == "🔥 證交所當日熱錢綜合診斷":
         fig.update_layout(height=500, xaxis_title="量能倍數 ( > 1.0 代表爆量 )", yaxis_title="三維度健檢總分")
         st.plotly_chart(fig, use_container_width=True)
 
-        # 數據資料表
-        st.subheader(f"📋 今日精選優質熱錢強勢股 (共 {len(df)} 支，按總分排序)")
+        st.subheader(f"📋 精選熱錢強勢股 (共 {len(df)} 支，按總分排序)")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("💡 點擊下方展開個別風控與卡位點位細節：")
+        price_col = "現價(元)" if market_code == "TW" else "現價(美元)"
+        vol_col = "當日成交量(張)" if market_code == "TW" else "當日成交量(股)"
+        est_vol_col = "預估成交量(張)" if market_code == "TW" else "預估成交量(股)"
+
         for item in results:
-            with st.expander(f"🌟 【{item['代號']} {item['名稱']}】 健檢總分：{item['健檢總分']} 分 | 漲跌幅：{item['漲跌幅(%)']}%"):
+            with st.expander(f"🌟 【{item['代號']} - {item['名稱']}】 健檢總分：{item['健檢總分']} 分 | 漲跌幅：{item['漲跌幅(%)']}%"):
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("現價", f"{item['現價']} 元", f"{item['漲跌幅(%)']}%")
-                col2.metric("成交 / 預估量", f"{item['當日成交張數']} 張", f"預估 {item['預估成交張數']} 張")
+                col1.metric("現價", f"{item[price_col]}", f"{item['漲跌幅(%)']}%")
+                col2.metric("成交 / 預估量", f"{item[vol_col]}", f"預估 {item[est_vol_col]}")
                 col3.metric("建議卡位區", item["建議卡位進場區"])
                 col4.metric("目標 / 停損", f"{item['第一目標價']} / {item['停損防守價']}")
     else:
         st.warning("目前設定之分數門檻過高，無符合標的，請嘗試調低側邊欄的「最低健檢總分門檻」。")
 
 # -----------------------------------------------------------------------------
-# 模式 2：號碼區間掃描
+# 模式 2：號碼區間/清單掃描
 # -----------------------------------------------------------------------------
-elif app_mode == "🔍 號碼區間掃描":
-    if st.button("🚀 開始區間掃描", type="primary"):
-        if "2300" in scan_mode:
-            symbols = [f"{c}.TW" for c in range(2301, 2400)]
-        elif "2400" in scan_mode:
-            symbols = [f"{c}.TW" for c in range(2401, 2500)]
-        elif "3000" in scan_mode:
-            symbols = [f"{c}.TW" for c in range(3001, 3100)] + [f"{c}.TWO" for c in range(3201, 3400)]
-        elif "6100" in scan_mode:
-            symbols = [f"{c}.TWO" for c in range(6101, 6700)]
+elif app_mode == "🔍 號碼區間/清單掃描":
+    if st.button("🚀 開始批次掃描", type="primary"):
+        if market_code == "TW":
+            if "2300" in scan_mode:
+                symbols = [f"{c}.TW" for c in range(2301, 2400)]
+            elif "2400" in scan_mode:
+                symbols = [f"{c}.TW" for c in range(2401, 2500)]
+            elif "3000" in scan_mode:
+                symbols = [f"{c}.TW" for c in range(3001, 3100)] + [f"{c}.TWO" for c in range(3201, 3400)]
+            elif "6100" in scan_mode:
+                symbols = [f"{c}.TWO" for c in range(6101, 6700)]
+            else:
+                symbols = [f"{c}.TW" for c in range(start_code, end_code + 1)]
         else:
-            symbols = [f"{c}.TW" for c in range(start_code, end_code + 1)]
+            clean_input = custom_us_list.replace("\n", ",").replace("，", ",")
+            symbols = [s.strip().upper() for s in clean_input.split(",") if s.strip()]
 
-        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的，門檻：技術 $\ge$ {min_tech}分 | 籌碼 $\ge$ {min_chip}分 | 位階 $\ge$ {min_fund}分 | 當日量 $\ge$ {min_vol_actual} 張 | 預估量 $\ge$ {min_vol_est} 張...")
+        st.info(f"🔍 正在連線分析 {len(symbols)} 檔標的...")
         progress_bar = st.progress(0)
 
         results = []
@@ -379,6 +403,7 @@ elif app_mode == "🔍 號碼區間掃描":
             progress_bar.progress((idx + 1) / len(symbols))
             res = evaluate_stock_full(
                 symbol, 
+                market_type=market_code,
                 min_vol_actual=min_vol_actual, 
                 min_vol_est=min_vol_est,
                 min_tech=min_tech,
@@ -395,40 +420,50 @@ elif app_mode == "🔍 號碼區間掃描":
             st.success(f"🎉 掃描完成！共有 {len(df)} 檔符合門檻標的：")
             st.dataframe(df, use_container_width=True, hide_index=True)
 
+            price_col = "現價(元)" if market_code == "TW" else "現價(美元)"
+            vol_col = "當日成交量(張)" if market_code == "TW" else "當日成交量(股)"
+            est_vol_col = "預估成交量(張)" if market_code == "TW" else "預估成交量(股)"
+
             for item in results:
-                with st.expander(f"🌟 【{item['代號']} {item['名稱']}】 健檢總分：{item['健檢總分']} 分 (技術:{item['技術得分']} | 籌碼:{item['籌碼得分']} | 位階:{item['位階得分']})"):
+                with st.expander(f"🌟 【{item['代號']} - {item['名稱']}】 健檢總分：{item['健檢總分']} 分"):
                     col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("最新價", f"{item['現價']} 元", f"{item['漲跌幅(%)']}%")
-                    col2.metric("成交張數", f"{item['當日成交張數']} 張", f"預估 {item['預估成交張數']} 張")
+                    col1.metric("最新價", f"{item[price_col]}", f"{item['漲跌幅(%)']}%")
+                    col2.metric("成交量", f"{item[vol_col]}", f"預估 {item[est_vol_col]}")
                     col3.metric("建議進場區", item["建議卡位進場區"])
                     col4.metric("目標 / 停損", f"{item['第一目標價']} / {item['停損防守價']}")
         else:
-            st.warning("💡 當前條件下無符合標的，可嘗試調低各項分數或成交量門檻。")
+            st.warning("💡 當前條件下無符合標的，可嘗試調低分數或成交量門檻。")
 
 # -----------------------------------------------------------------------------
-# 模式 3：單股精準診斷
+# 模組 3：單股精準診斷
 # -----------------------------------------------------------------------------
 elif app_mode == "🩺 單股精準診斷":
     if single_code:
-        res = evaluate_stock_full(f"{single_code}.TW")
-        if not res:
-            res = evaluate_stock_full(f"{single_code}.TWO")
+        search_symbol = single_code if market_code == "US" else f"{single_code}.TW"
+        res = evaluate_stock_full(search_symbol, market_type=market_code)
+        
+        if not res and market_code == "TW":
+            res = evaluate_stock_full(f"{single_code}.TWO", market_type=market_code)
 
         if res:
-            st.subheader(f"🩺 【{res['代號']} {res['名稱']}】 診斷與風控點位報告")
+            st.subheader(f"🩺 【{res['代號']} - {res['名稱']}】 診斷與風控點位報告")
+
+            price_col = "現價(元)" if market_code == "TW" else "現價(美元)"
+            vol_col = "當日成交量(張)" if market_code == "TW" else "當日成交量(股)"
+            est_vol_col = "預估成交量(張)" if market_code == "TW" else "預估成交量(股)"
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("最新價", f"{res['現價']} 元", f"{res['漲跌幅(%)']}%")
+            col1.metric("最新價", f"{res[price_col]}", f"{res['漲跌幅(%)']}%")
             col2.metric("健檢總分", f"{res['健檢總分']} / 100 分")
-            col3.metric("當日 / 預估量", f"{res['當日成交張數']} 張", f"預估 {res['預估成交張數']} 張")
+            col3.metric("當日 / 預估量", f"{res[vol_col]}", f"預估 {res[est_vol_col]}")
             col4.metric("風險報酬比", res["風報比(R/R)"])
 
             st.divider()
             st.markdown("### 🎯 建議進出場關鍵點位")
             p_col1, p_col2, p_col3 = st.columns(3)
-            p_col1.success(f"🟢 **建議卡位進場區**\n\n### {res['建議卡位進場區']} 元")
-            p_col2.info(f"🚀 **第一目標看價位**\n\n### {res['第一目標價']} 元")
-            p_col3.error(f"🛑 **嚴格防守停損價**\n\n### {res['停損防守價']} 元")
+            p_col1.success(f"🟢 **建議卡位進場區**\n\n### {res['建議卡位進場區']}")
+            p_col2.info(f"🚀 **第一目標看價位**\n\n### {res['第一目標價']}")
+            p_col3.error(f"🛑 **嚴格防守停損價**\n\n### {res['停損防守價']}")
 
             st.divider()
             st.markdown("### 📊 三維度得分拆解")
@@ -437,4 +472,4 @@ elif app_mode == "🩺 單股精準診斷":
             s_col2.progress(res["籌碼得分"] / 35, text=f"📊 籌碼面：{res['籌碼得分']} / 35 分")
             s_col3.progress(res["位階得分"] / 30, text=f"🛡️ 位階面：{res['位階得分']} / 30 分")
         else:
-            st.error(f"❌ 查無代號 `{single_code}` 的資料，請確認輸入是否正確。")
+            st.error(f"❌ 查無`{target_market}`代號 `{single_code}` 的資料，請確認輸入是否正確。")
